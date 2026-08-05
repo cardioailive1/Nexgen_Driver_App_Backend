@@ -1,0 +1,186 @@
+// Prisma schema for Nexgen Driver App backend.
+// Designed for Postgres (Fly.io Postgres, Render Postgres, Supabase, etc).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Driver {
+  id               String       @id @default(uuid())
+  name             String
+  email            String       @unique
+  passwordHash     String
+  active           Boolean      @default(true)
+  online           Boolean      @default(false)
+  lat              Float?
+  lng              Float?
+  earnings         Float        @default(0)
+  trips            Int          @default(0)
+  activeRideId     String?      @unique
+  stripeAccountId  String?
+  payoutsEnabled   Boolean      @default(false)
+  createdAt        DateTime     @default(now())
+  ridesAsDriver    Ride[]       @relation("DriverRides")
+  tripRecords      TripRecord[]
+  application      DriverApplication?
+
+  // ---- Performance counters, incremented directly as events happen
+  // (see server.js) rather than computed from history each time. ----
+  requestsReceived Int @default(0) // ride requests this driver was offered
+  requestsAccepted Int @default(0) // of those, how many they accepted
+  requestsDeclined Int @default(0) // of those, how many they declined (the rest timed out)
+  tripsCancelled   Int @default(0) // trips they accepted but then cancelled before completion
+
+  // ---- Rewards. Tiers are derived from this, not stored separately — see
+  // REWARD_TIERS in server.js. Silver 200 / Gold 400 / Premium 600 / Diamond 1000. ----
+  rewardPoints     Int @default(0)
+}
+
+// One application per driver. Holds everything needed to approve someone to
+// drive: personal/demographic info, license, insurance, vehicle details, the
+// uploaded documents (stored in S3 — this table only holds object keys, not
+// file bytes), and the Checkr background-check state.
+//
+// Deliberately NOT stored here: SSN. The Checkr hosted invitation flow
+// collects SSN directly from the driver on Checkr's own page — it never
+// passes through this backend or this database.
+model DriverApplication {
+  id       String @id @default(uuid())
+  driverId String @unique
+  driver   Driver @relation(fields: [driverId], references: [id])
+
+  status String @default("draft")
+  // draft -> submitted -> under_review -> approved | rejected
+
+  // ---- Personal / demographic ----
+  legalFirstName String?
+  legalLastName  String?
+  dateOfBirth    String? // YYYY-MM-DD
+  phone          String?
+  email          String?
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  state          String?
+  zip            String?
+
+  // ---- Driver's license ----
+  licenseNumber     String?
+  licenseState      String?
+  licenseExpiration String? // YYYY-MM-DD
+  licenseFrontKey   String? // S3 object key
+  licenseBackKey    String?
+
+  // ---- Insurance ----
+  insuranceProvider   String?
+  insurancePolicyNum  String?
+  insuranceExpiration String? // YYYY-MM-DD
+  insuranceDocKey     String? // declarations page, PDF or image
+
+  // ---- Vehicle ----
+  vehicleMake        String?
+  vehicleModel       String?
+  vehicleYear        String?
+  vehicleColor       String?
+  licensePlate       String?
+  vin                String?
+  registrationDocKey String?
+  vehiclePhotoFrontKey String?
+  vehiclePhotoBackKey  String?
+  vehiclePhotoLeftKey  String?
+  vehiclePhotoRightKey String?
+
+  // ---- Checkr background check ----
+  checkrCandidateId   String?
+  checkrInvitationId  String?
+  checkrInvitationUrl String?
+  checkrReportId      String?
+  checkrStatus        String? // pending | consider | clear | suspended | dispute — Checkr's own statuses
+  checkrPackage       String  @default("driver_pro") // adjust to whatever Checkr package your account is set up with
+
+  // ---- Manual review (documents Checkr doesn't cover) ----
+  reviewNotes    String?
+  reviewedBy     String?
+  reviewedAt     DateTime?
+
+  submittedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Rider {
+  id                     String   @id @default(uuid())
+  name                   String
+  lat                    Float?
+  lng                    Float?
+  stripeCustomerId       String?
+  defaultPaymentMethodId String?
+  cardBrand              String?
+  cardLast4              String?
+  createdAt              DateTime @default(now())
+  rides                  Ride[]   @relation("RiderRides")
+}
+
+model Ride {
+  id            String   @id @default(uuid())
+  status        String   @default("pending") // pending | accepted | in_progress | completed | cancelled | cancelled_by_driver | no_drivers
+  pickupLat     Float
+  pickupLng     Float
+  dropLat       Float
+  dropLng       Float
+  pickupLabel   String?
+  dropLabel     String?
+  estDistanceKm Float?
+  declinedBy    String[] @default([])
+  riderId       String
+  rider         Rider    @relation("RiderRides", fields: [riderId], references: [id])
+  driverId      String?
+  driver        Driver?  @relation("DriverRides", fields: [driverId], references: [id])
+  cancelReason  String?  // set when a rider cancels — see CANCEL_REASONS in the rider frontend
+  dispatchMode  String?  // "direct" | "matched" — see matchDriver() in server.js
+  matchDistanceKm Float?
+  matchDurationMin Float?
+  createdAt     DateTime @default(now())
+}
+
+// Real admin accounts — replaces the earlier shared-token scheme. Creating
+// new admins requires ADMIN_SETUP_KEY (a server-side secret), so this isn't
+// open self-registration: see /api/admin/auth/register in server.js.
+model Admin {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+model TripRecord {
+  id              String   @id @default(uuid())
+  driverId        String
+  driver          Driver   @relation(fields: [driverId], references: [id])
+  riderId         String?
+  riderName       String?  // denormalized at trip completion — avoids a join just to show who left a rating
+  pickupLabel     String?
+  dropLabel       String?
+  fare            Float
+  distanceKm      Float
+  durationMin     Float
+  driverPayout    Float    @default(0) // driver's 60% take-home
+  platformFee     Float    @default(0) // Nexgen's 20%
+  insuranceFee    Float    @default(0) // 20% reserved for processing fees + insurance
+  gasPricePerGallon Float? // real gas price used to compute this trip's fuel component — see fuelPricing.js
+  fuelCostPerKm     Float?
+  paymentIntentId String?
+  paymentStatus   String   @default("skipped") // skipped | succeeded | failed | requires_action
+  rating          Int?     // 1-5, set by the rider after the trip
+  ratingComment   String?  // optional written feedback alongside the rating
+  tipAmount       Float    @default(0) // goes 100% to the driver — no platform fee on tips
+  tipPaymentIntentId String?
+  tipStatus       String   @default("none") // none | succeeded | failed
+  createdAt       DateTime @default(now())
+}

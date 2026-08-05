@@ -1,0 +1,30 @@
+app = "nexgen-driver-backend" # change to a unique name, or run `fly launch` and let it pick one
+
+primary_region = "iad" # pick the region closest to you
+
+[build]
+
+[env]
+  PORT = "3000"
+
+[[services]]
+  internal_port = 3000
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "get"
+    path = "/health"
+
+[deploy]
+  release_command = "npx prisma migrate deploy"
