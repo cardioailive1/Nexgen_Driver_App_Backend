@@ -26,6 +26,10 @@ function issueAdminToken(adminId) {
   return jwt.sign({ adminId, role: 'admin' }, getSecret(), { expiresIn: TOKEN_TTL });
 }
 
+function issueRiderToken(riderId) {
+  return jwt.sign({ riderId }, getSecret(), { expiresIn: TOKEN_TTL });
+}
+
 function verifyToken(token) {
   try {
     return jwt.verify(token, getSecret());
@@ -79,4 +83,27 @@ function requireAdminAuth(req, res, next) {
   next();
 }
 
-module.exports = { hashPassword, verifyPassword, issueToken, issueAdminToken, verifyToken, requireAuth, requireSelf, requireAdminAuth };
+/** Rider auth — mirrors requireAuth/requireSelf for drivers. A rider's
+ * token can never pass as a driver or admin token, and vice versa, since
+ * each payload shape only has its own id field. */
+function requireRiderAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Missing Authorization header' });
+
+  const payload = verifyToken(token);
+  if (!payload || !payload.riderId) return res.status(401).json({ error: 'Invalid or expired token' });
+
+  req.riderId = payload.riderId;
+  next();
+}
+
+function requireRiderSelf(req, res, next) {
+  if (req.riderId !== req.params.id) return res.status(403).json({ error: 'Forbidden' });
+  next();
+}
+
+module.exports = {
+  hashPassword, verifyPassword, issueToken, issueAdminToken, issueRiderToken, verifyToken,
+  requireAuth, requireSelf, requireAdminAuth, requireRiderAuth, requireRiderSelf,
+};
