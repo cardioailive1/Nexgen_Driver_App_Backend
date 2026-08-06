@@ -116,6 +116,9 @@ model DriverApplication {
 model Rider {
   id                     String   @id @default(uuid())
   name                   String
+  email                  String?  @unique
+  passwordHash           String?
+  profilePhotoKey        String?  // S3 object key — required before a rider can request a ride
   lat                    Float?
   lng                    Float?
   stripeCustomerId       String?

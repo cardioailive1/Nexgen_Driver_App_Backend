@@ -5,6 +5,12 @@ database (e.g. a Render Postgres instance), managed by Prisma.
 
 ## 1. Database — Render Postgres
 
+**Option A:** the frontend zip's `render.yaml` Blueprint provisions this
+database for you alongside the frontend static site (see that README's
+"Deploy to Render" section) — if you used that, skip to step 2 below and
+just grab the connection string from the database it already created.
+
+**Option B — manual:**
 1. In the Render dashboard: **New → PostgreSQL**. Pick a name/region and create it.
 2. Once it's up, open the database and copy the **External Connection String**
    (not the internal one — Fly.io isn't on Render's private network, so this

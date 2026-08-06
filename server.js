@@ -449,16 +449,67 @@ app.get('/api/driver/:id', auth.requireAuth, auth.requireSelf, async (req, res) 
   res.json(d);
 });
 
-app.post('/api/rider/register', async (req, res) => {
-  const name = (req.body && req.body.name) || 'Rider';
-  const rider = await prisma.rider.create({ data: { name } });
-  res.json({ riderId: rider.id, rider });
+// ---------------------------------------------------------------------------
+// Rider authentication — mirrors driver auth exactly. Replaces the old
+// anonymous "just type a name" flow. A rider now needs a real account
+// (email + password) and a profile photo before they can request a ride —
+// both enforced here on the backend, not just hidden behind app screens.
+// ---------------------------------------------------------------------------
+app.post('/api/rider/auth/register', async (req, res) => {
+  const { name, email, password } = req.body || {};
+  if (!name || !email || !password) return res.status(400).json({ error: 'name, email, and password are required' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+
+  const existing = await prisma.rider.findUnique({ where: { email: email.toLowerCase() } });
+  if (existing) return res.status(409).json({ error: 'An account with this email already exists.' });
+
+  const passwordHash = await auth.hashPassword(password);
+  const rider = await prisma.rider.create({ data: { name, email: email.toLowerCase(), passwordHash } });
+  const token = auth.issueRiderToken(rider.id);
+  res.json({ riderId: rider.id, token, rider: { id: rider.id, name: rider.name, email: rider.email, profilePhotoKey: rider.profilePhotoKey } });
 });
 
-app.get('/api/rider/:id', async (req, res) => {
+app.post('/api/rider/auth/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+
+  const rider = await prisma.rider.findUnique({ where: { email: email.toLowerCase() } });
+  if (!rider || !rider.passwordHash || !(await auth.verifyPassword(password, rider.passwordHash))) {
+    return res.status(401).json({ error: 'Incorrect email or password.' });
+  }
+  const token = auth.issueRiderToken(rider.id);
+  res.json({ riderId: rider.id, token, rider: { id: rider.id, name: rider.name, email: rider.email, profilePhotoKey: rider.profilePhotoKey } });
+});
+
+app.get('/api/rider/auth/me', auth.requireRiderAuth, async (req, res) => {
+  const rider = await prisma.rider.findUnique({ where: { id: req.riderId } });
+  if (!rider) return res.status(404).json({ error: 'rider not found' });
+  const photoUrl = rider.profilePhotoKey ? await documents.getDownloadUrl(rider.profilePhotoKey) : null;
+  res.json({ ...rider, photoUrl });
+});
+
+app.get('/api/rider/:id', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
   const r = await prisma.rider.findUnique({ where: { id: req.params.id } });
   if (!r) return res.status(404).json({ error: 'rider not found' });
   res.json(r);
+});
+
+// ---- Rider profile photo — required before requesting a ride ----
+app.post('/api/rider/:id/photo/upload-url', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
+  try {
+    const { uploadUrl, key } = await documents.getRiderPhotoUploadUrl(req.params.id);
+    res.json({ uploadUrl, key });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/rider/:id/photo/confirm', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
+  const { key } = req.body || {};
+  if (!key) return res.status(400).json({ error: 'key is required' });
+  const rider = await prisma.rider.update({ where: { id: req.params.id }, data: { profilePhotoKey: key } });
+  const photoUrl = await documents.getDownloadUrl(rider.profilePhotoKey);
+  res.json({ ok: true, photoUrl });
 });
 
 // ---------------------------------------------------------------------------
@@ -500,7 +551,7 @@ app.get('/api/driver/:id/stripe/status', auth.requireAuth, auth.requireSelf, asy
 // ---------------------------------------------------------------------------
 // Stripe — rider payment methods
 // ---------------------------------------------------------------------------
-app.post('/api/rider/:id/stripe/setup-intent', async (req, res) => {
+app.post('/api/rider/:id/stripe/setup-intent', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
   if (!stripe) return res.status(400).json({ error: 'Stripe is not configured on this server (missing STRIPE_SECRET_KEY).' });
   const rider = await prisma.rider.findUnique({ where: { id: req.params.id } });
   if (!rider) return res.status(404).json({ error: 'rider not found' });
@@ -516,7 +567,7 @@ app.post('/api/rider/:id/stripe/setup-intent', async (req, res) => {
   res.json({ clientSecret: setupIntent.client_secret, customerId });
 });
 
-app.post('/api/rider/:id/stripe/confirm-payment-method', async (req, res) => {
+app.post('/api/rider/:id/stripe/confirm-payment-method', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
   if (!stripe) return res.status(400).json({ error: 'Stripe is not configured on this server.' });
   const { paymentMethodId } = req.body;
   const rider = await prisma.rider.findUnique({ where: { id: req.params.id } });
@@ -1203,14 +1254,32 @@ io.on('connection', (socket) => {
   });
 
   // ---- Rider events ----
-  socket.on('rider:join', ({ riderId }) => {
-    riderSockets[riderId] = socket.id;
-    socket.riderId = riderId;
+  // rider:join now takes a JWT instead of a bare riderId — same hardening
+  // as the driver side. Every rider:* handler below uses socket.riderId
+  // (set here after verifying the token), not whatever a client claims.
+  socket.on('rider:join', ({ token }) => {
+    const payload = auth.verifyToken(token);
+    if (!payload || !payload.riderId) {
+      socket.emit('auth:error', { error: 'Your session has expired. Please log in again.' });
+      return;
+    }
+    riderSockets[payload.riderId] = socket.id;
+    socket.riderId = payload.riderId;
   });
 
-  socket.on('rider:request', async ({ riderId, pickup, drop, pickupLabel, dropLabel }) => {
+  socket.on('rider:request', async ({ pickup, drop, pickupLabel, dropLabel }) => {
+    const riderId = socket.riderId;
+    if (!riderId) return;
+
     const rider = await prisma.rider.update({ where: { id: riderId }, data: { lat: pickup.lat, lng: pickup.lng } }).catch(() => null);
     if (!rider) return;
+
+    // A profile photo is required before requesting a ride — enforced here,
+    // not just by hiding the button in the app.
+    if (!rider.profilePhotoKey) {
+      socket.emit('ride:profileIncomplete', { reason: 'Add a profile photo before requesting a ride.' });
+      return;
+    }
 
     const match = await matchDriver(pickup.lat, pickup.lng);
     if (!match.driver) {

@@ -38,10 +38,22 @@ async function getUploadUrl(driverId, docType) {
   return { uploadUrl, key };
 }
 
+/** Same presigned-upload pattern as driver documents, but for a rider's
+ * profile photo — a separate namespace (riders/...) since it's a different
+ * entity, not one of the DOC_TYPES enum values above. */
+async function getRiderPhotoUploadUrl(riderId) {
+  if (!s3) throw new Error('Document storage is not configured on this server (missing S3_BUCKET).');
+
+  const key = `riders/${riderId}/profile-${randomUUID()}`;
+  const command = new PutObjectCommand({ Bucket: BUCKET, Key: key });
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 });
+  return { uploadUrl, key };
+}
+
 async function getDownloadUrl(key) {
   if (!s3 || !key) return null;
   const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
   return getSignedUrl(s3, command, { expiresIn: 300 });
 }
 
-module.exports = { isConfigured, getUploadUrl, getDownloadUrl, DOC_TYPES };
+module.exports = { isConfigured, getUploadUrl, getRiderPhotoUploadUrl, getDownloadUrl, DOC_TYPES };
