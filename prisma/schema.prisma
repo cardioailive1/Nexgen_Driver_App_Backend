@@ -118,6 +118,8 @@ model Rider {
   name                   String
   email                  String?  @unique
   passwordHash           String?
+  phone                  String?  // optional, not verified — for driver contact / delivery-style convenience, not KYC
+  homeAddress            String?  // free-text, optional — lets a rider save a default pickup/reference address
   profilePhotoKey        String?  // S3 object key — required before a rider can request a ride
   lat                    Float?
   lng                    Float?

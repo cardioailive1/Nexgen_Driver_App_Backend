@@ -456,7 +456,7 @@ app.get('/api/driver/:id', auth.requireAuth, auth.requireSelf, async (req, res) 
 // both enforced here on the backend, not just hidden behind app screens.
 // ---------------------------------------------------------------------------
 app.post('/api/rider/auth/register', async (req, res) => {
-  const { name, email, password } = req.body || {};
+  const { name, email, password, phone, homeAddress } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: 'name, email, and password are required' });
   if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
 
@@ -464,9 +464,11 @@ app.post('/api/rider/auth/register', async (req, res) => {
   if (existing) return res.status(409).json({ error: 'An account with this email already exists.' });
 
   const passwordHash = await auth.hashPassword(password);
-  const rider = await prisma.rider.create({ data: { name, email: email.toLowerCase(), passwordHash } });
+  const rider = await prisma.rider.create({
+    data: { name, email: email.toLowerCase(), passwordHash, phone: phone || null, homeAddress: homeAddress || null },
+  });
   const token = auth.issueRiderToken(rider.id);
-  res.json({ riderId: rider.id, token, rider: { id: rider.id, name: rider.name, email: rider.email, profilePhotoKey: rider.profilePhotoKey } });
+  res.json({ riderId: rider.id, token, rider: { id: rider.id, name: rider.name, email: rider.email, phone: rider.phone, homeAddress: rider.homeAddress, profilePhotoKey: rider.profilePhotoKey } });
 });
 
 app.post('/api/rider/auth/login', async (req, res) => {
@@ -486,6 +488,21 @@ app.get('/api/rider/auth/me', auth.requireRiderAuth, async (req, res) => {
   if (!rider) return res.status(404).json({ error: 'rider not found' });
   const photoUrl = rider.profilePhotoKey ? await documents.getDownloadUrl(rider.profilePhotoKey) : null;
   res.json({ ...rider, photoUrl });
+});
+
+// Lets an existing rider add or edit their phone/home address after signup
+// — most riders in this system predate these fields existing at all, so
+// this is the only way for them to fill them in. All fields optional and
+// independently updatable (send only what changed).
+app.post('/api/rider/:id/profile', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
+  const { name, phone, homeAddress } = req.body || {};
+  const data = {};
+  if (name !== undefined) data.name = name;
+  if (phone !== undefined) data.phone = phone || null;
+  if (homeAddress !== undefined) data.homeAddress = homeAddress || null;
+
+  const rider = await prisma.rider.update({ where: { id: req.params.id }, data });
+  res.json({ id: rider.id, name: rider.name, phone: rider.phone, homeAddress: rider.homeAddress });
 });
 
 app.get('/api/rider/:id', auth.requireRiderAuth, auth.requireRiderSelf, async (req, res) => {
